@@ -98,7 +98,7 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	if SIZE <= 0 {
-		SIZE = 1472
+		SIZE = 65000 // JUMBO FRAMES: Maximum GB/s throughput by pushing max fragmented packets
 	}
 
 	fmt.Printf("[%s] UDP Flood started: %s:%s for %ds (%d bytes) [SESSION %d]\n",
